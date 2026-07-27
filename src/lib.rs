@@ -34,6 +34,8 @@
 
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
+#[cfg(feature = "audio")]
+pub mod audio;
 mod audio_cache;
 mod client;
 mod connection;

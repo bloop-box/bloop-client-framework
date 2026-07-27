@@ -9,6 +9,9 @@ license = "BSD-2-Clause"
 repository = "https://github.com/bloop-box/bloop-client-framework"
 
 [features]
+## Audio playback for achievement and UI sounds.
+audio = ["dep:rodio"]
+
 ## NFC reader handle, backend channel, and NDEF parsing.
 nfc = []
 
@@ -39,6 +42,11 @@ linux-embedded-hal = { version = "0.4.0", default-features = false, features = [
     "spidev",
 ], optional = true }
 mfrc522 = { version = "0.8.0", features = ["std"], optional = true }
+rodio = { version = "0.22.2", default-features = false, features = [
+    "mp3",
+    "playback",
+    "tracing",
+], optional = true }
 tokio-io-timeout = "1.2.0"
 tokio-rustls = "0.26.2"
 tracing = "0.1.43"
