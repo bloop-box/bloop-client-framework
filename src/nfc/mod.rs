@@ -13,7 +13,7 @@ mod mfrc522;
 mod ndef;
 
 #[cfg(feature = "nfc-mfrc522")]
-pub use mfrc522::{Mfrc522InitError, NfcReaderConfig};
+pub use mfrc522::{Mfrc522InitError, NfcReaderConfig, serve_blocking as serve_mfrc522};
 pub use ndef::{NdefError, NdefMessageParser, NdefTextRecord, parse_ndef_text_record};
 
 use bloop_protocol::NfcUid;

@@ -53,6 +53,26 @@ impl Default for NfcReaderConfig {
     }
 }
 
+/// Serves the backend on the calling thread, returning on channel close.
+///
+/// The blocking sibling of [`NfcReader::spawn_mfrc522`], for applications
+/// that manage reader threads themselves (e.g. under a thread supervisor).
+///
+/// # Errors
+///
+/// Returns an [`Mfrc522InitError`] if the hardware fails to initialize.
+///
+/// [`NfcReader::spawn_mfrc522`]: super::NfcReader::spawn_mfrc522
+pub fn serve_blocking(
+    config: NfcReaderConfig,
+    backend: NfcReaderBackend,
+) -> Result<(), Mfrc522InitError> {
+    let (adapter, reset_line) = init(config)?;
+    serve(adapter, reset_line, backend);
+
+    Ok(())
+}
+
 /// Spawns the backend thread, awaiting its hardware initialization.
 pub(super) async fn spawn(
     config: NfcReaderConfig,
@@ -77,9 +97,7 @@ fn run(
     mut backend: NfcReaderBackend,
     init_tx: oneshot::Sender<Result<(), Mfrc522InitError>>,
 ) {
-    // The GPIO request must stay alive for the reader's lifetime; releasing
-    // it would let the reset line float.
-    let (mut adapter, _reset_line) = match init(config) {
+    let (adapter, reset_line) = match init(config) {
         Ok(initialized) => {
             let _ = init_tx.send(Ok(()));
             initialized
@@ -90,6 +108,12 @@ fn run(
         }
     };
 
+    serve(adapter, reset_line, backend);
+}
+
+// The GPIO request must stay alive for the reader's lifetime; releasing it
+// would let the reset line float.
+fn serve(mut adapter: InitializedAdapter, _reset_line: Request, mut backend: NfcReaderBackend) {
     'main_loop: while let Some(request) = backend.blocking_recv() {
         match request {
             NfcReaderRequest::WaitForCard(response) => {
