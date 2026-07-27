@@ -1,0 +1,60 @@
+[package]
+name = "bloop-client-framework"
+description = "Client framework for the Bloop wire protocol"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Ben Scholzen 'DASPRiD' <mail@dasprids.de>"]
+license = "BSD-2-Clause"
+repository = "https://github.com/bloop-box/bloop-client-framework"
+
+[features]
+## NFC reader handle, backend channel, and NDEF parsing.
+nfc = []
+
+## Built-in MFRC522 reader backend (Linux, SPI + GPIO).
+nfc-mfrc522 = ["nfc", "dep:mfrc522", "dep:linux-embedded-hal", "dep:gpiocdev"]
+
+## Implements `IntoSubsystem` for the client.
+tokio-graceful-shutdown = ["dep:tokio-graceful-shutdown"]
+
+[dependencies]
+bloop-protocol = "1.1"
+rustls = "0.23.28"
+thiserror = "2.0"
+tokio = { version = "1.48", default-features = false, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "sync",
+    "time",
+] }
+tokio-graceful-shutdown = { version = "0.19.2", optional = true }
+
+gpiocdev = { version = "0.7.3", optional = true }
+linux-embedded-hal = { version = "0.4.0", default-features = false, features = [
+    "spi",
+    "spidev",
+], optional = true }
+mfrc522 = { version = "0.8.0", features = ["std"], optional = true }
+tokio-io-timeout = "1.2.0"
+tokio-rustls = "0.26.2"
+tracing = "0.1.43"
+rustls-native-certs = "0.8.1"
+uuid = "1.19"
+webpki-roots = "1.0.1"
+
+[dev-dependencies]
+argon2 = "0.5.3"
+bloop-server-framework = "2"
+tempfile = "3.23"
+tokio = { version = "1.48", features = ["full"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(docsrs)"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
