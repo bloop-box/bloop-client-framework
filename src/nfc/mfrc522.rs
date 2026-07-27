@@ -94,7 +94,7 @@ pub(super) async fn spawn(
 #[instrument(skip(backend, init_tx))]
 fn run(
     config: NfcReaderConfig,
-    mut backend: NfcReaderBackend,
+    backend: NfcReaderBackend,
     init_tx: oneshot::Sender<Result<(), Mfrc522InitError>>,
 ) {
     let (adapter, reset_line) = match init(config) {

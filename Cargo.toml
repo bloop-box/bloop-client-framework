@@ -33,7 +33,7 @@ tokio = { version = "1.48", default-features = false, features = [
 ] }
 tokio-graceful-shutdown = { version = "0.19.2", optional = true }
 
-gpiocdev = { version = "0.7.3", optional = true }
+gpiocdev = { version = "0.8.0", optional = true }
 linux-embedded-hal = { version = "0.4.0", default-features = false, features = [
     "spi",
     "spidev",
