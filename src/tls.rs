@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::{verify_tls12_signature, verify_tls13_signature};
+use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use rustls_platform_verifier::BuilderVerifierExt;
 use thiserror::Error;
 use tokio_rustls::TlsConnector;
 use tracing::warn;
@@ -14,23 +15,22 @@ use tracing::warn;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum TlsError {
-    /// The platform's native certificate store could not be loaded.
-    #[error("failed to load native certificates: {0}")]
-    NativeCerts(String),
-
+    /// Constructing the rustls client configuration failed.
     #[error(transparent)]
     Rustls(#[from] rustls::Error),
 }
 
 /// Source of the root certificates used to verify the server.
 #[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
 pub enum RootCertSource {
-    /// The built-in `webpki-roots` bundle.
+    /// The operating system's certificate verifier.
+    ///
+    /// On Linux this loads the system CA bundle (the `ca-certificates`
+    /// package on Debian) once at startup; locally installed CAs require an
+    /// application restart to be picked up.
     #[default]
-    BuiltIn,
-
-    /// The platform's native certificate store.
-    Native,
+    Platform,
 
     /// No verification at all; accepts any certificate.
     ///
@@ -39,41 +39,38 @@ pub enum RootCertSource {
 }
 
 pub(crate) fn create_connector(source: RootCertSource) -> Result<TlsConnector, TlsError> {
-    let root_cert_store = match source {
-        RootCertSource::BuiltIn => RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-        },
-        RootCertSource::Native => {
-            let mut root_cert_store = RootCertStore::empty();
-            let result = rustls_native_certs::load_native_certs();
-
-            if !result.errors.is_empty() {
-                return Err(TlsError::NativeCerts(format!("{:?}", result.errors)));
-            }
-
-            for cert in result.certs {
-                root_cert_store.add(cert)?;
-            }
-
-            root_cert_store
+    // ClientConfig::builder() panics when no process-default crypto provider
+    // can be resolved (e.g. two provider features enabled somewhere in the
+    // dependency graph); passing the provider explicitly on both arms keeps
+    // build() panic-free as its Result promises.
+    let client_config = match source {
+        RootCertSource::Platform => {
+            ClientConfig::builder_with_provider(Arc::new(default_provider()))
+                .with_safe_default_protocol_versions()?
+                .with_platform_verifier()?
+                .with_no_client_auth()
         }
         RootCertSource::DangerousDisabled => {
             warn!("certificate verification is disabled; only use this for testing!");
 
-            let client_config = ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(SkipCertificateVerification::new())
-                .with_no_client_auth();
+            let verifier = SkipCertificateVerification::new();
+            let provider = Arc::new(verifier.0.clone());
 
-            return Ok(TlsConnector::from(Arc::new(client_config)));
+            ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()?
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth()
         }
     };
 
-    let client_config = ClientConfig::builder()
-        .with_root_certificates(root_cert_store)
-        .with_no_client_auth();
-
     Ok(TlsConnector::from(Arc::new(client_config)))
+}
+
+fn default_provider() -> CryptoProvider {
+    CryptoProvider::get_default()
+        .map(|provider| provider.as_ref().clone())
+        .unwrap_or_else(rustls::crypto::aws_lc_rs::default_provider)
 }
 
 /// A certificate verifier that accepts anything.
@@ -82,11 +79,7 @@ struct SkipCertificateVerification(rustls::crypto::CryptoProvider);
 
 impl SkipCertificateVerification {
     fn new() -> Arc<Self> {
-        Arc::new(Self(
-            rustls::crypto::CryptoProvider::get_default()
-                .map(|provider| provider.as_ref().clone())
-                .unwrap_or_else(rustls::crypto::aws_lc_rs::default_provider),
-        ))
+        Arc::new(Self(default_provider()))
     }
 }
 

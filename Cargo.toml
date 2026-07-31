@@ -47,12 +47,11 @@ rodio = { version = "0.22.2", default-features = false, features = [
     "playback",
     "tracing",
 ], optional = true }
+rustls-platform-verifier = "0.7.0"
 tokio-io-timeout = "1.2.0"
 tokio-rustls = "0.26.2"
 tracing = "0.1.43"
-rustls-native-certs = "0.8.1"
 uuid = "1.19"
-webpki-roots = "1.0.1"
 
 [dev-dependencies]
 argon2 = "0.5.3"
