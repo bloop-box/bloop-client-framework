@@ -46,7 +46,7 @@ mod tls;
 
 pub use bloop_protocol;
 
-pub use audio_cache::{AudioCache, AudioCacheError};
+pub use audio_cache::{AudioCache, AudioCacheError, AudioProvider};
 pub use client::{
     BloopClient, BloopClientBuilder, ConnectionConfig, ConnectionStatus, InvalidCredentialsPolicy,
     OnConnectError, OnConnectFuture, PreloadOutcome,

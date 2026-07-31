@@ -23,6 +23,7 @@ use tokio::task::{self, JoinHandle};
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PlaybackError {
+    /// Opening the audio source failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -106,6 +107,12 @@ where
     let cancel_flag = cancelled.clone();
 
     let join_handle = task::spawn_blocking(move || {
+        // A handle dropped before the blocking pool got to us (e.g. a lost
+        // select! race) should not open the device and emit a stray blip.
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         // A fresh output stream per playback: a long-lived ALSA stream
         // accumulates underruns while idle and eventually starts crackling,
         // especially on Pi-class hardware. The per-playback overhead is not
@@ -117,7 +124,13 @@ where
 
         let player = Player::connect_new(device_sink.mixer());
         player.set_volume(volume);
-        player.append(Decoder::new(open()?).map_err(PlaybackError::Decode)?);
+        let source = Decoder::new(open()?).map_err(PlaybackError::Decode)?;
+
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        player.append(source);
 
         while !player.empty() {
             sleep(Duration::from_millis(50));
