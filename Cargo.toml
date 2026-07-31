@@ -7,6 +7,7 @@ rust-version = "1.88"
 authors = ["Ben Scholzen 'DASPRiD' <mail@dasprids.de>"]
 license = "BSD-2-Clause"
 repository = "https://github.com/bloop-box/bloop-client-framework"
+exclude = ["/.github", "/.gitignore", "/.releaserc.yml", "/tests"]
 
 [features]
 ## Audio playback for achievement and UI sounds.

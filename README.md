@@ -41,24 +41,24 @@ use bloop_client_framework::Request;
 use bloop_protocol::{Decode, Encode, Payload};
 
 #[derive(Debug, Encode, Decode, Payload)]
-#[bloop(opcode = 0x82)]
-struct CallPhoneNumber {
-    number: String,
+#[bloop(opcode = 0x80)]
+struct SubmitScore {
     nfc_uid: NfcUid,
+    score: u32,
 }
 
 #[derive(Debug, Encode, Decode, Payload)]
-#[bloop(opcode = 0x83)]
-struct CallAccepted {
-    achievement: AchievementRecord,
+#[bloop(opcode = 0x81)]
+struct ScoreAccepted {
+    rank: u32,
 }
 
-impl Request for CallPhoneNumber {
-    type Response = CallAccepted;
+impl Request for SubmitScore {
+    type Response = ScoreAccepted;
 }
 
 // Fully typed request-response:
-let accepted = client.custom(CallPhoneNumber { number, nfc_uid }).await?;
+let accepted = client.custom(SubmitScore { nfc_uid, score }).await?;
 ```
 
 Protocol errors, including extension-defined codes, arrive as `RequestError::Error(ErrorResponse)`. For exchanges
@@ -72,12 +72,16 @@ before the status flips to `Connected`; a hook failure fails the attempt:
 ```rust
 let builder = builder.on_connect(|session| {
     Box::pin(async move {
-        let list = session.custom(PhoneNumberPreload).await?;
+        let scores = session.custom(FetchHighScores).await?;
         // store the list somewhere shared
         Ok(())
     })
 });
 ```
+
+All server I/O inside the hook must go through the `Session`: the hook runs on the client's own connection task,
+so calling methods on a captured `BloopClient` handle in the hook deadlocks the client. `AudioCache` accepts a
+`&mut Session` for the same reason.
 
 ## Audio cache
 
@@ -93,8 +97,11 @@ if let Some(path) = cache.ensure(&client, &record).await? {
 }
 
 // Or as a preload after a PreloadOutcome::Mismatch:
-cache.sync(&client, &achievements).await?;
+let skipped = cache.sync(&client, &achievements).await?;
 ```
+
+`sync` returns the IDs of achievements whose audio the server refused to deliver; a non-empty list means the sync
+was partial, so don't persist the new manifest hash and the next preload check will retry.
 
 ## NFC reader
 
@@ -102,26 +109,37 @@ The `nfc` feature provides a channel-backed reader handle with cancel-safe waits
 NDEF text-record parsing. The `nfc-mfrc522` feature adds the built-in backend for MFRC522 modules over SPI (Linux):
 
 ```rust
-use bloop_client_framework::nfc::{NfcReader, NfcReaderConfig};
+use bloop_client_framework::nfc::{NfcReader, Mfrc522Config};
 
-let reader = NfcReader::spawn_mfrc522(NfcReaderConfig::default()).await?;
+let reader = NfcReader::spawn_mfrc522(Mfrc522Config::default()).await?;
 
 let uid = reader.wait_for_card().await?;
 let achievements = client.bloop(uid).await?;
 reader.wait_for_removal().await?;
 ```
 
-Custom or emulated backends serve the other end of `NfcReader::channel()` instead.
+Custom or emulated backends serve the other end of `NfcReader::channel()` instead, and `serve_mfrc522` runs the
+built-in backend blocking on the calling thread for applications that supervise reader threads themselves.
 
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| `nfc` | NFC reader handle, backend channel, and NDEF parsing |
-| `nfc-mfrc522` | Built-in MFRC522 reader backend (Linux, SPI + GPIO) |
+All features are off by default:
+
+```toml
+[dependencies]
+bloop-client-framework = { version = "1", features = ["audio", "nfc-mfrc522"] }
+```
+
+| Feature                   | Description                                                             |
+|---------------------------|-------------------------------------------------------------------------|
+| `audio`                   | Audio playback for achievement and UI sounds                            |
+| `nfc`                     | NFC reader handle, backend channel, and NDEF parsing                    |
+| `nfc-mfrc522`             | Built-in MFRC522 reader backend (Linux, SPI + GPIO)                     |
 | `tokio-graceful-shutdown` | Implements `IntoSubsystem` for the client, quitting cleanly on shutdown |
 
 ## TLS
 
-The server certificate is verified against the built-in `webpki-roots` bundle by default; `RootCertSource::Native`
-uses the platform store instead, and `RootCertSource::DangerousDisabled` skips verification entirely for testing.
+The server certificate is verified through the operating system's certificate verifier
+([rustls-platform-verifier](https://github.com/rustls/rustls-platform-verifier)). On Linux this reads the system CA
+bundle once at startup, so locally installed CAs (e.g. for self-signed certificates) require an application restart.
+`RootCertSource::DangerousDisabled` skips verification entirely for testing.
