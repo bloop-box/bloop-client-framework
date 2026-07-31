@@ -23,6 +23,7 @@ use crate::nfc::ndef::{NdefMessageParser, parse_ndef_text_record};
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Mfrc522InitError {
+    /// Opening the SPI device or spawning the reader thread failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
@@ -36,14 +37,28 @@ pub enum Mfrc522InitError {
 }
 
 /// Hardware wiring of the MFRC522 reader.
+///
+/// Construct by mutating the defaults:
+///
+/// ```
+/// # use bloop_client_framework::nfc::Mfrc522Config;
+/// let mut config = Mfrc522Config::default();
+/// config.reset_pin_line = 23;
+/// ```
 #[derive(Clone, Debug)]
-pub struct NfcReaderConfig {
+#[non_exhaustive]
+pub struct Mfrc522Config {
+    /// SPI device the reader is wired to.
     pub spi_dev_path: PathBuf,
+
+    /// GPIO character device holding the reset line.
     pub gpio_dev_path: PathBuf,
+
+    /// Line offset of the reset pin on the GPIO device.
     pub reset_pin_line: u32,
 }
 
-impl Default for NfcReaderConfig {
+impl Default for Mfrc522Config {
     fn default() -> Self {
         Self {
             spi_dev_path: "/dev/spidev0.0".into(),
@@ -64,7 +79,7 @@ impl Default for NfcReaderConfig {
 ///
 /// [`NfcReader::spawn_mfrc522`]: super::NfcReader::spawn_mfrc522
 pub fn serve_blocking(
-    config: NfcReaderConfig,
+    config: Mfrc522Config,
     backend: NfcReaderBackend,
 ) -> Result<(), Mfrc522InitError> {
     let (adapter, reset_line) = init(config)?;
@@ -75,7 +90,7 @@ pub fn serve_blocking(
 
 /// Spawns the backend thread, awaiting its hardware initialization.
 pub(super) async fn spawn(
-    config: NfcReaderConfig,
+    config: Mfrc522Config,
     backend: NfcReaderBackend,
 ) -> Result<(), Mfrc522InitError> {
     let (init_tx, init_rx) = oneshot::channel();
@@ -93,7 +108,7 @@ pub(super) async fn spawn(
 
 #[instrument(skip(backend, init_tx))]
 fn run(
-    config: NfcReaderConfig,
+    config: Mfrc522Config,
     backend: NfcReaderBackend,
     init_tx: oneshot::Sender<Result<(), Mfrc522InitError>>,
 ) {
@@ -163,7 +178,7 @@ fn serve(mut adapter: InitializedAdapter, _reset_line: Request, mut backend: Nfc
 
 type InitializedAdapter = Adapter<SpiInterface<SpidevDevice, DummyDelay>>;
 
-fn init(config: NfcReaderConfig) -> Result<(InitializedAdapter, Request), Mfrc522InitError> {
+fn init(config: Mfrc522Config) -> Result<(InitializedAdapter, Request), Mfrc522InitError> {
     let options = SpidevOptions::new()
         .max_speed_hz(1_000_000)
         .mode(SpiModeFlags::SPI_MODE_0)
@@ -232,7 +247,10 @@ impl<E, COMM: Interface<Error = E>> Adapter<COMM> {
 
         let total_bytes = (capabilities[2] as usize) * 8;
         let total_pages = total_bytes / 4;
-        let total_quads = (total_pages / 4) as u8;
+        // The capability container byte is tag-controlled; the clamp keeps a
+        // hostile value from overflowing the u8 block address (4 * quad),
+        // which caps out at quad 63.
+        let total_quads = (total_pages / 4).min(63) as u8;
 
         for quad in 1..total_quads + 1 {
             let quad_data = self

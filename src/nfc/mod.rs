@@ -13,7 +13,7 @@ mod mfrc522;
 mod ndef;
 
 #[cfg(feature = "nfc-mfrc522")]
-pub use mfrc522::{Mfrc522InitError, NfcReaderConfig, serve_blocking as serve_mfrc522};
+pub use mfrc522::{Mfrc522Config, Mfrc522InitError, serve_blocking as serve_mfrc522};
 pub use ndef::{NdefError, NdefMessageParser, NdefTextRecord, parse_ndef_text_record};
 
 use bloop_protocol::NfcUid;
@@ -73,7 +73,7 @@ impl NfcReader {
     /// Returns an [`Mfrc522InitError`] if the SPI device, the GPIO reset
     /// line, or the chip itself fails to initialize.
     #[cfg(feature = "nfc-mfrc522")]
-    pub async fn spawn_mfrc522(config: NfcReaderConfig) -> Result<Self, Mfrc522InitError> {
+    pub async fn spawn_mfrc522(config: Mfrc522Config) -> Result<Self, Mfrc522InitError> {
         let (reader, backend) = Self::channel();
         mfrc522::spawn(config, backend).await?;
 

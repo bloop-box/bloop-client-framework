@@ -32,7 +32,7 @@ pub enum NdefError {
     InvalidUtf8(#[from] std::string::FromUtf8Error),
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum State {
     Init,
     Length,
@@ -44,6 +44,7 @@ enum State {
 /// Feed tag data block by block via [`add_data`](Self::add_data) until
 /// [`is_done`](Self::is_done); the message bytes are then available through
 /// [`data`](Self::data).
+#[derive(Debug)]
 pub struct NdefMessageParser {
     state: State,
     length: i32,
@@ -128,6 +129,7 @@ impl Default for NdefMessageParser {
 }
 
 /// A parsed NDEF text record.
+#[derive(Debug)]
 pub struct NdefTextRecord {
     value: Vec<u8>,
 }
