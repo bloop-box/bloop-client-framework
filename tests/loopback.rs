@@ -101,6 +101,12 @@ async fn spawn_server() -> u16 {
         while let Some(request) = custom_rx.recv().await {
             let TestRequest::Echo(echo) = request.request;
 
+            if echo.text == "kill" {
+                // Dropping the response sender makes the listener tear the
+                // connection down; used to provoke a server-side loss.
+                continue;
+            }
+
             let outcome = if echo.text == "fail" {
                 CustomOutcome::Error(ErrorResponse::Custom(0x90))
             } else {
@@ -351,6 +357,52 @@ async fn audio_cache_downloads_and_prunes() {
     );
     assert!(!stale.exists());
     assert!(path.exists());
+
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconnects_after_connection_loss() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let port = spawn_server().await;
+
+    let connect_count = Arc::new(AtomicUsize::new(0));
+    let hook_count = connect_count.clone();
+
+    let client = client_builder(port)
+        .on_connect(move |_session| {
+            let hook_count = hook_count.clone();
+
+            Box::pin(async move {
+                hook_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        })
+        .build()
+        .unwrap();
+
+    wait_connected(&client).await;
+
+    let error = client
+        .custom(EchoRequest {
+            text: "kill".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, RequestError::Disconnected));
+
+    wait_connected(&client).await;
+    assert_eq!(connect_count.load(Ordering::SeqCst), 2);
+
+    // The fresh connection is fully usable.
+    let response = client
+        .custom(EchoRequest {
+            text: "hi".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.text, "ih");
 
     client.shutdown().await;
 }
