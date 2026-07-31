@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use bloop_protocol::frame::RawMessage;
 use bloop_protocol::message::{
-    AchievementRecord, Bloop, BloopAccepted, PreloadCheck, PreloadMatch, PreloadMismatch,
-    RetrieveAudio,
+    AchievementRecord, Bloop, BloopAccepted, ErrorResponse, PreloadCheck, PreloadMatch,
+    PreloadMismatch, RetrieveAudio,
 };
-use bloop_protocol::set::{Payload, encode_message};
+use bloop_protocol::set::{Payload, decode_message, encode_message};
 use bloop_protocol::{Capabilities, DataHash, NfcUid};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::{select, time};
@@ -27,9 +27,16 @@ use crate::tls::{RootCertSource, TlsError, create_connector};
 /// Server address and credentials for a connection.
 #[derive(Clone, Debug)]
 pub struct ConnectionConfig {
+    /// Host name or address of the server.
     pub host: String,
+
+    /// Port the server listens on.
     pub port: u16,
+
+    /// Client ID sent during authentication.
     pub client_id: String,
+
+    /// Client secret sent during authentication.
     pub client_secret: String,
 }
 
@@ -44,14 +51,22 @@ pub enum ConnectionStatus {
     Disconnected,
 
     /// Connected and authenticated.
-    Connected { capabilities: Capabilities },
+    #[non_exhaustive]
+    Connected {
+        /// The capabilities the server declared in its handshake.
+        capabilities: Capabilities,
+    },
 
     /// The server rejected the credentials.
     InvalidCredentials,
+
+    /// The client was shut down and will not reconnect.
+    Shutdown,
 }
 
 /// How the client behaves after the server rejects its credentials.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum InvalidCredentialsPolicy {
     /// Stop connecting until new credentials arrive via
     /// [`BloopClient::configure`].
@@ -70,7 +85,10 @@ pub enum PreloadOutcome {
 
     /// The cache is outdated; the current manifest and asset list follow.
     Mismatch {
+        /// Hash of the server's current audio manifest.
         audio_manifest_hash: DataHash,
+
+        /// The full current achievement list.
         achievements: Vec<AchievementRecord>,
     },
 }
@@ -108,6 +126,7 @@ pub struct BloopClientBuilder {
     root_cert_source: RootCertSource,
     ping_interval: Duration,
     io_timeout: Duration,
+    request_timeout: Duration,
     max_payload_len: u32,
     invalid_credentials_policy: InvalidCredentialsPolicy,
     on_connect: Option<Arc<OnConnectFn>>,
@@ -121,6 +140,7 @@ impl BloopClientBuilder {
             root_cert_source: RootCertSource::default(),
             ping_interval: Duration::from_secs(3),
             io_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(60),
             max_payload_len: 16 * 1024 * 1024,
             invalid_credentials_policy: InvalidCredentialsPolicy::default(),
             on_connect: None,
@@ -147,8 +167,27 @@ impl BloopClientBuilder {
     }
 
     /// Overrides the per-operation read/write timeout on the stream.
+    ///
+    /// This is an idle timeout: it fires when the server sends nothing at
+    /// all for the given duration. See also
+    /// [`request_timeout`](Self::request_timeout).
     pub fn io_timeout(mut self, timeout: Duration) -> Self {
         self.io_timeout = timeout;
+        self
+    }
+
+    /// Overrides the total deadline for a single request-response exchange.
+    ///
+    /// Unlike [`io_timeout`](Self::io_timeout), this bounds the whole
+    /// exchange, so a server that keeps trickling bytes cannot hold a
+    /// request (and with it the connection task) open indefinitely. The
+    /// default of 60 seconds leaves room for a multi-MiB audio download on a
+    /// slow link. The same deadline separately applies to each connection
+    /// attempt, to the on-connect hook, and to enqueueing a request on a
+    /// busy client, so a caller may wait a small multiple of it in the
+    /// worst case.
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
         self
     }
 
@@ -180,7 +219,7 @@ impl BloopClientBuilder {
     /// ```ignore
     /// let builder = builder.on_connect(|session| {
     ///     Box::pin(async move {
-    ///         let list = session.custom(PhoneNumberPreload).await?;
+    ///         let list = session.custom(FetchHighScores).await?;
     ///         // store the list somewhere shared
     ///         Ok(())
     ///     })
@@ -219,6 +258,7 @@ impl BloopClientBuilder {
             command_rx,
             status_tx,
             ping_interval: self.ping_interval,
+            request_timeout: self.request_timeout,
             options: ConnectOptions {
                 io_timeout: self.io_timeout,
                 max_payload_len: self.max_payload_len,
@@ -234,27 +274,33 @@ impl BloopClientBuilder {
         Ok(BloopClient {
             command_tx,
             status_rx,
+            request_timeout: self.request_timeout,
         })
-    }
-}
-
-/// Runs the client as a subsystem that quits cleanly on shutdown.
-///
-/// The connection task itself runs independently; this subsystem only waits
-/// for the shutdown request and announces the disconnect to the server.
-#[cfg(feature = "tokio-graceful-shutdown")]
-impl IntoSubsystem<std::convert::Infallible> for BloopClient {
-    async fn run(self, subsys: &mut SubsystemHandle) -> Result<(), std::convert::Infallible> {
-        subsys.on_shutdown_requested().await;
-        self.shutdown().await;
-
-        Ok(())
     }
 }
 
 impl Default for BloopClientBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for BloopClientBuilder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BloopClientBuilder")
+            .field("config", &self.config)
+            .field("root_cert_source", &self.root_cert_source)
+            .field("ping_interval", &self.ping_interval)
+            .field("io_timeout", &self.io_timeout)
+            .field("request_timeout", &self.request_timeout)
+            .field("max_payload_len", &self.max_payload_len)
+            .field(
+                "invalid_credentials_policy",
+                &self.invalid_credentials_policy,
+            )
+            .field("on_connect", &self.on_connect.as_ref().map(|_| "..."))
+            .finish()
     }
 }
 
@@ -269,6 +315,7 @@ impl Default for BloopClientBuilder {
 pub struct BloopClient {
     command_tx: mpsc::Sender<Command>,
     status_rx: watch::Receiver<ConnectionStatus>,
+    request_timeout: Duration,
 }
 
 impl BloopClient {
@@ -286,7 +333,8 @@ impl BloopClient {
     ///
     /// Drops any current connection, clears an invalid-credentials latch,
     /// and reconnects with the new configuration; `None` returns the client
-    /// to [`Unconfigured`](ConnectionStatus::Unconfigured).
+    /// to [`Unconfigured`](ConnectionStatus::Unconfigured). After
+    /// [`shutdown`](Self::shutdown) this is a no-op.
     ///
     /// # Errors
     ///
@@ -331,6 +379,11 @@ impl BloopClient {
     }
 
     /// Asks the server whether the cached audio assets are up to date.
+    ///
+    /// Only call this when the server declared
+    /// [`Capabilities::PreloadCheck`] in its handshake (available via
+    /// [`ConnectionStatus::Connected`]); servers without the capability
+    /// answer with a fatal error and close the connection.
     ///
     /// # Errors
     ///
@@ -383,34 +436,49 @@ impl BloopClient {
 
     /// Shuts the client down, announcing the disconnect to the server.
     ///
-    /// Bounded to a few seconds; queued requests ahead of the shutdown are
-    /// allowed to finish, but a stalled connection cannot hold it up
-    /// indefinitely.
+    /// Returns after a few seconds at the latest. Requests already queued
+    /// ahead of the shutdown may outlive that bound; the connection task
+    /// keeps draining them and winds down (announcing the disconnect,
+    /// publishing [`ConnectionStatus::Shutdown`]) once it reaches the
+    /// shutdown command.
+    ///
+    /// The shutdown affects the shared connection task: any surviving clones
+    /// of the handle stay usable as values but every operation on them
+    /// returns [`RequestError::Shutdown`].
     pub async fn shutdown(self) {
         let (response_tx, response_rx) = oneshot::channel();
 
-        if self
-            .command_tx
-            .send(Command::Shutdown {
-                response: response_tx,
-            })
-            .await
-            .is_ok()
-        {
-            let _ = time::timeout(Duration::from_secs(5), response_rx).await;
-        }
+        let _ = time::timeout(Duration::from_secs(5), async {
+            if self
+                .command_tx
+                .send(Command::Shutdown {
+                    response: response_tx,
+                })
+                .await
+                .is_ok()
+            {
+                let _ = response_rx.await;
+            }
+        })
+        .await;
     }
 
     async fn send_request(&self, message: RawMessage) -> Result<RawMessage, RequestError> {
         let (response_tx, response_rx) = oneshot::channel();
 
         self.command_tx
-            .send(Command::Request {
-                message,
-                response: response_tx,
-            })
+            .send_timeout(
+                Command::Request {
+                    message,
+                    response: response_tx,
+                },
+                self.request_timeout,
+            )
             .await
-            .map_err(|_| RequestError::Shutdown)?;
+            .map_err(|error| match error {
+                mpsc::error::SendTimeoutError::Closed(_) => RequestError::Shutdown,
+                mpsc::error::SendTimeoutError::Timeout(_) => RequestError::Disconnected,
+            })?;
 
         response_rx.await.map_err(|_| RequestError::Shutdown)?
     }
@@ -423,6 +491,7 @@ struct ClientTask {
     command_rx: mpsc::Receiver<Command>,
     status_tx: watch::Sender<ConnectionStatus>,
     ping_interval: Duration,
+    request_timeout: Duration,
     options: ConnectOptions,
     invalid_credentials_policy: InvalidCredentialsPolicy,
     on_connect: Option<Arc<OnConnectFn>>,
@@ -445,9 +514,14 @@ impl ClientTask {
             }
         }
 
+        // All handles are gone: announce the disconnect and let any
+        // remaining status receivers observe a terminal state instead of a
+        // stale one.
         if let Some(mut connection) = self.connection.take() {
             connection.quit().await;
         }
+
+        self.set_status(ConnectionStatus::Shutdown);
     }
 
     async fn handle_command(&mut self, command: Command) {
@@ -464,7 +538,7 @@ impl ClientTask {
                 }
 
                 self.credentials_invalid = false;
-                let _ = self.status_tx.send(if config.is_some() {
+                self.set_status(if config.is_some() {
                     ConnectionStatus::Disconnected
                 } else {
                     ConnectionStatus::Unconfigured
@@ -482,12 +556,29 @@ impl ClientTask {
                     return;
                 };
 
-                match connection.request_raw(&message).await {
-                    Ok(raw) => {
+                match time::timeout(self.request_timeout, connection.request_raw(&message)).await {
+                    Ok(Ok(raw)) => {
+                        // A fatal protocol error means the server has
+                        // already closed the connection; drop ours so the
+                        // status watch does not keep claiming Connected
+                        // until the next ping notices.
+                        if raw.message_type == ErrorResponse::OPCODE
+                            && decode_message::<ErrorResponse>(&raw)
+                                .is_ok_and(|error| error.is_fatal())
+                        {
+                            warn!("server answered with a fatal error");
+                            self.drop_connection();
+                        }
+
                         let _ = response.send(Ok(raw));
                     }
-                    Err(error) => {
+                    Ok(Err(error)) => {
                         warn!("lost connection due to: {}", error);
+                        self.drop_connection();
+                        let _ = response.send(Err(RequestError::Disconnected));
+                    }
+                    Err(_) => {
+                        warn!("request exceeded the request timeout");
                         self.drop_connection();
                         let _ = response.send(Err(RequestError::Disconnected));
                     }
@@ -499,7 +590,7 @@ impl ClientTask {
                 }
 
                 self.shutdown = true;
-                let _ = self.status_tx.send(ConnectionStatus::Disconnected);
+                self.set_status(ConnectionStatus::Shutdown);
                 let _ = response.send(());
             }
         }
@@ -511,9 +602,16 @@ impl ClientTask {
         }
 
         if let Some(connection) = self.connection.as_mut() {
-            if let Err(error) = connection.ping().await {
-                warn!("ping failed: {}", error);
-                self.drop_connection();
+            match time::timeout(self.request_timeout, connection.ping()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    warn!("ping failed: {}", error);
+                    self.drop_connection();
+                }
+                Err(_) => {
+                    warn!("ping exceeded the request timeout");
+                    self.drop_connection();
+                }
             }
 
             return;
@@ -535,36 +633,90 @@ impl ClientTask {
 
         info!("trying to connect to server");
 
-        match connect(config, &self.connector, &self.options).await {
+        let outcome = match time::timeout(
+            self.request_timeout,
+            connect(config, &self.connector, &self.options),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                error!("connection attempt exceeded the request timeout");
+                self.set_status(ConnectionStatus::Disconnected);
+                return;
+            }
+        };
+
+        match outcome {
             Ok(ConnectOutcome::Connected(mut connection)) => {
                 if let Some(hook) = self.on_connect.clone() {
                     let mut session = Session::new(&mut connection);
 
-                    if let Err(error) = hook(&mut session).await {
-                        warn!("on-connect hook failed: {}", error);
-                        connection.quit().await;
-                        return;
+                    match time::timeout(self.request_timeout, hook(&mut session)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            warn!("on-connect hook failed: {}", error);
+                            connection.quit().await;
+                            self.set_status(ConnectionStatus::Disconnected);
+                            return;
+                        }
+                        Err(_) => {
+                            warn!("on-connect hook exceeded the request timeout");
+                            self.set_status(ConnectionStatus::Disconnected);
+                            return;
+                        }
                     }
                 }
 
                 self.credentials_invalid = false;
-                let _ = self.status_tx.send(ConnectionStatus::Connected {
+                self.set_status(ConnectionStatus::Connected {
                     capabilities: connection.capabilities(),
                 });
                 self.connection = Some(connection);
             }
             Ok(ConnectOutcome::InvalidCredentials) => {
                 self.credentials_invalid = true;
-                let _ = self.status_tx.send(ConnectionStatus::InvalidCredentials);
+                self.set_status(ConnectionStatus::InvalidCredentials);
             }
             Err(error) => {
                 error!("failed to connect to server: {}", error);
+
+                // A network failure is not a credentials problem; without
+                // this, a failed attempt under the Retry policy would leave
+                // a stale InvalidCredentials on the watch.
+                self.set_status(ConnectionStatus::Disconnected);
             }
         }
     }
 
     fn drop_connection(&mut self) {
         self.connection = None;
-        let _ = self.status_tx.send(ConnectionStatus::Disconnected);
+        self.set_status(ConnectionStatus::Disconnected);
+    }
+
+    /// Publishes a status, skipping the notification when it is unchanged.
+    fn set_status(&self, status: ConnectionStatus) {
+        self.status_tx.send_if_modified(|current| {
+            if *current == status {
+                false
+            } else {
+                *current = status;
+                true
+            }
+        });
+    }
+}
+
+/// Runs the client as a subsystem that quits cleanly on shutdown.
+///
+/// The connection task itself runs independently; this subsystem only waits
+/// for the shutdown request and announces the disconnect to the server.
+#[cfg(feature = "tokio-graceful-shutdown")]
+impl IntoSubsystem<std::convert::Infallible> for BloopClient {
+    async fn run(self, subsys: &mut SubsystemHandle) -> Result<(), std::convert::Infallible> {
+        subsys.on_shutdown_requested().await;
+        self.shutdown().await;
+
+        Ok(())
     }
 }

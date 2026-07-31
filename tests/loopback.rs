@@ -170,7 +170,7 @@ async fn wait_connected(client: &BloopClient) -> Capabilities {
     .unwrap();
 
     match *status {
-        ConnectionStatus::Connected { capabilities } => capabilities,
+        ConnectionStatus::Connected { capabilities, .. } => capabilities,
         _ => unreachable!(),
     }
 }

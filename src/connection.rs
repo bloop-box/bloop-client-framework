@@ -114,6 +114,15 @@ pub struct Session<'connection> {
     connection: &'connection mut Connection,
 }
 
+impl std::fmt::Debug for Session<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Session")
+            .field("capabilities", &self.connection.capabilities)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Session<'_> {
     pub(crate) fn new(connection: &mut Connection) -> Session<'_> {
         Session { connection }
@@ -204,10 +213,13 @@ pub(crate) async fn connect(
     timeout_stream.set_read_timeout(Some(options.io_timeout));
     timeout_stream.set_write_timeout(Some(options.io_timeout));
 
+    // The largest legal server message before authentication completes is a
+    // 9-byte handshake; a tight bound here denies a hostile server the
+    // configured multi-MiB allowance before it has even authenticated us.
     let mut connection = Connection {
         stream: Box::pin(timeout_stream),
         capabilities: Capabilities::none(),
-        max_payload_len: options.max_payload_len,
+        max_payload_len: 1024,
     };
 
     connection.capabilities = negotiate_version(&mut connection).await?;
@@ -217,6 +229,8 @@ pub(crate) async fn connect(
     if !authenticated {
         return Ok(ConnectOutcome::InvalidCredentials);
     }
+
+    connection.max_payload_len = options.max_payload_len;
 
     Ok(ConnectOutcome::Connected(connection))
 }
